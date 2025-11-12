@@ -59,7 +59,14 @@ jobs:
             echo "::error::BODS returned 0 datasets."; exit 1
           fi
 
-          # Filter to North West by dataset name OR any admin area object name
+          echo "Sample dataset fields (first record) for debugging:"
+          jq -C '(.results // [])[0] | {name, adminAreas, admin_areas, download_url, url, resources}' datasets.json | head -n 120 || true
+
+          # Build a list of *valid* download URLs:
+          # - Consider download_url, url, and any resources[].url
+          # - Keep only proper http(s) links
+          # - Prefer likely downloads: endswith .zip OR contains /download/
+          # - Limit to 10 for the first run (remove | .[:10] later)
           jq -r '
             (.results // [])
             | map(
@@ -68,7 +75,7 @@ jobs:
                   ((.name // "" | tostring)
                     | test("(?i)(north\\s*west|greater manchester|merseyside|lancashire|cumbria|cheshire|blackpool|blackburn|warrington|halton|westmorland|cumberland)"))
                   or
-                  # any admin area object name match (handles adminAreas/admin_areas)
+                  # any admin area object name match (handles adminAreas/admin_areas variants)
                   (
                     ((.adminAreas // .admin_areas // [])
                       | any(
@@ -79,18 +86,49 @@ jobs:
                   )
                 )
               )
-            | .[:10]                # limit for first run; remove later
-            | .[] .download_url
-          ' datasets.json | while read -r u; do
+            | map(
+                [
+                  (.download_url // empty),
+                  (.url // empty),
+                  ((.resources // [])[]? .url // empty)
+                ]
+                | map(select(type=="string" and test("^https?://")))
+                | unique
+              )
+            | flatten
+            | map(select( (endswith(".zip") or contains("/download/")) ))
+            | .[:10]
+            | .[]
+          ' datasets.json > urls.txt
+
+          echo "Filtered URLs (debug):"
+          nl -ba urls.txt || true
+
+          URL_COUNT=$(wc -l < urls.txt | tr -d ' ')
+          echo "Filtered download URLs: $URL_COUNT"
+          if [ "$URL_COUNT" -eq 0 ]; then
+            echo "::error::No valid download URLs after filtering.";
+            echo "Dumping first two NW-like datasets for inspection:"
+            jq -C '
+              (.results // [])
+              | map(select((.name // "" | test("(?i)(north\\s*west|greater manchester|merseyside|lancashire|cumbria|cheshire|blackpool|blackburn|warrington|halton|westmorland|cumberland)"))) 
+              | .[:2])
+              | .[]
+              | {name, download_url, url, resources}
+            ' datasets.json | head -n 200 || true
+            exit 1
+          fi
+
+          while IFS= read -r u; do
             [ -z "$u" ] && continue
             echo "Downloading $u"
             curl -Ls "$u" -o "txc-build/downloads/$(basename "$u")"
-          done
+          done < urls.txt
 
           DL_COUNT=$(ls -1 txc-build/downloads/*.zip 2>/dev/null | wc -l | tr -d ' ')
           echo "Downloaded ZIPs: $DL_COUNT"
           if [ "$DL_COUNT" -eq 0 ]; then
-            echo "::error::No TXC ZIPs were downloaded after filtering."; exit 1
+            echo "::error::No TXC ZIPs were downloaded."; exit 1
           fi
 
       - name: Build stop→services index
