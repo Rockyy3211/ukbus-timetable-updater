@@ -1,0 +1,136 @@
+name: Build & publish TXC (North West)
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    env:
+      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+      CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}
+      KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
+      BODS_API_KEY:  ${{ secrets.BODS_API_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node 20
+        uses: actions/setup-node@v4
+        with: { node-version: '20' }
+
+      - name: Prepare dirs
+        run: mkdir -p txc-build/downloads txc-build/shards
+
+      - name: Install build deps
+        working-directory: txc-build
+        run: npm install --no-fund --no-audit
+
+      - name: Download TXC datasets (North West)
+        shell: bash
+        env:
+          API: ${{ secrets.BODS_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${API:-}" ]; then echo "::error::BODS_API_KEY secret is missing."; exit 1; fi
+          echo "::add-mask::$API"
+
+          META_URL="https://data.bus-data.dft.gov.uk/api/v1/dataset/?limit=1000&status=published&api_key=$API"
+          HTTP=$(curl -sS -H "Accept: application/json" -o datasets.json -w "%{http_code}" "$META_URL")
+          echo "BODS metadata HTTP: $HTTP"
+          if [ "$HTTP" != "200" ]; then
+            head -c 800 datasets.json || true; echo
+            echo "::error::BODS API failed (HTTP $HTTP)."; exit 1
+          fi
+
+          COUNT=$(jq '(.results // []) | length' datasets.json)
+          echo "Metadata records: $COUNT"
+          if [ "$COUNT" -eq 0 ]; then echo "::error::BODS returned 0 datasets."; exit 1; fi
+
+          mkdir -p txc-build/downloads
+
+          # Build list of valid URLs for NW and save as fixed .zip filenames
+          jq -r '
+            (.results // [])
+            | map(
+                select(
+                  ((.name // "" | tostring)
+                    | test("(?i)(north\\s*west|greater manchester|merseyside|lancashire|cumbria|cheshire|blackpool|blackburn|warrington|halton|westmorland|cumberland)"))
+                  or
+                  (
+                    ((.adminAreas // .admin_areas // [])
+                      | any(
+                          ((.name // .Name // "" | tostring)
+                            | test("(?i)(Greater Manchester|Merseyside|Lancashire|Cumbria|Cheshire East|Cheshire West and Chester|Blackburn with Darwen|Blackpool|Warrington|Halton|Westmorland and Furness|Cumberland)"))
+                        )
+                    )
+                  )
+                )
+              )
+            | map(
+                [
+                  (.download_url // empty),
+                  (.url // empty),
+                  ((.resources // [])[]? .url // empty)
+                ]
+                | map(select(type=="string" and test("^https?://")))
+                | unique
+              )
+            | flatten
+            | map(select( (endswith(".zip") or contains("/download/")) ))
+            | .[:10]
+            | .[]
+          ' datasets.json > urls.txt
+
+          echo "Filtered URLs:"; nl -ba urls.txt || true
+          URL_COUNT=$(wc -l < urls.txt | tr -d ' ')
+          if [ "$URL_COUNT" -eq 0 ]; then echo "::error::No valid download URLs after filtering."; exit 1; fi
+
+          OK=0; i=0
+          while IFS= read -r u; do
+            [ -z "$u" ] && continue
+            i=$((i+1)); printf -v OUT "txc-build/downloads/dataset-%03d.zip" "$i"
+            echo "Downloading $u -> $OUT"
+            if curl -fLs "$u" -o "$OUT"; then OK=$((OK+1)); else echo "::warning::Failed $u"; rm -f "$OUT" || true; fi
+          done < urls.txt
+
+          echo "Successful downloads: $OK"
+          DL_COUNT=$(find txc-build/downloads -maxdepth 1 -type f -name 'dataset-*.zip' | wc -l | tr -d ' ')
+          echo "ZIPs present: $DL_COUNT"
+          if [ "$DL_COUNT" -eq 0 ]; then echo "::error::No TXC ZIPs were downloaded."; exit 1; fi
+
+      - name: Build stop→services index
+        working-directory: txc-build
+        run: npm run build
+
+      - name: Shard JSON
+        working-directory: txc-build
+        run: npm run shard
+
+      - name: Install wrangler
+        run: npm i -g wrangler
+
+      - name: Upload to Cloudflare KV (per ATCO)
+        working-directory: txc-build/shards
+        env:
+          CF_ACCOUNT_ID: ${{ env.CF_ACCOUNT_ID }}
+          KV_NAMESPACE_ID: ${{ env.KV_NAMESPACE_ID }}
+        run: |
+          set -e
+          for f in *.json; do
+            echo "Uploading shard $f"
+            jq -r 'to_entries[] | "\(.key)\t\(.value|tojson)"' "$f" | \
+            while IFS=$'\t' read -r atco payload; do
+              wrangler kv key put \
+                --account-id "$CF_ACCOUNT_ID" \
+                --namespace-id "$KV_NAMESPACE_ID" \
+                "$atco" "$payload" --force
+            done
+          done
+
+      - name: Done
+        run: echo "KV updated."
