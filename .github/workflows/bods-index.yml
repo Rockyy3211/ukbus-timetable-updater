@@ -53,7 +53,7 @@ jobs:
 
           mkdir -p txc-build/downloads
 
-          # Build list of valid download URLs for NW
+          # Build list of valid URLs for NW and save as fixed .zip filenames
           jq -r '
             (.results // [])
             | map(
@@ -88,20 +88,18 @@ jobs:
 
           echo "Filtered URLs:"; nl -ba urls.txt || true
           URL_COUNT=$(wc -l < urls.txt | tr -d ' ')
-          if [ "$URL_COUNT" -eq 0 ]; then
-            echo "::error::No valid download URLs after filtering."; exit 1
-          fi
+          if [ "$URL_COUNT" -eq 0 ]; then echo "::error::No valid download URLs after filtering."; exit 1; fi
 
-          OK=0
+          OK=0; i=0
           while IFS= read -r u; do
             [ -z "$u" ] && continue
-            OUT="txc-build/downloads/$(basename "$u")"
+            i=$((i+1)); printf -v OUT "txc-build/downloads/dataset-%03d.zip" "$i"
             echo "Downloading $u -> $OUT"
             if curl -fLs "$u" -o "$OUT"; then OK=$((OK+1)); else echo "::warning::Failed $u"; rm -f "$OUT" || true; fi
           done < urls.txt
 
           echo "Successful downloads: $OK"
-          DL_COUNT=$(find txc-build/downloads -maxdepth 1 -type f -name '*.zip' | wc -l | tr -d ' ')
+          DL_COUNT=$(find txc-build/downloads -maxdepth 1 -type f -name 'dataset-*.zip' | wc -l | tr -d ' ')
           echo "ZIPs present: $DL_COUNT"
           if [ "$DL_COUNT" -eq 0 ]; then echo "::error::No TXC ZIPs were downloaded."; exit 1; fi
 
