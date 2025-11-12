@@ -59,12 +59,26 @@ jobs:
             echo "::error::BODS returned 0 datasets."; exit 1
           fi
 
+          # Filter to North West by dataset name OR any admin area object name
           jq -r '
             (.results // [])
-            | map(select(
-                (.name | test("(?i)north\\s*west|greater manchester|merseyside|lancashire|cumbria|cheshire|blackpool|blackburn|warrington|halton|westmorland|cumberland"))
-                or ((.adminAreas // [])[] | test("(?i)(Greater Manchester|Merseyside|Lancashire|Cumbria|Cheshire East|Cheshire West and Chester|Blackburn with Darwen|Blackpool|Warrington|Halton|Westmorland and Furness|Cumberland)"))
-              ))
+            | map(
+                select(
+                  # dataset name match
+                  ((.name // "" | tostring)
+                    | test("(?i)(north\\s*west|greater manchester|merseyside|lancashire|cumbria|cheshire|blackpool|blackburn|warrington|halton|westmorland|cumberland)"))
+                  or
+                  # any admin area object name match (handles adminAreas/admin_areas)
+                  (
+                    ((.adminAreas // .admin_areas // [])
+                      | any(
+                          ((.name // .Name // "" | tostring)
+                            | test("(?i)(Greater Manchester|Merseyside|Lancashire|Cumbria|Cheshire East|Cheshire West and Chester|Blackburn with Darwen|Blackpool|Warrington|Halton|Westmorland and Furness|Cumberland)"))
+                        )
+                    )
+                  )
+                )
+              )
             | .[:10]                # limit for first run; remove later
             | .[] .download_url
           ' datasets.json | while read -r u; do
@@ -72,6 +86,12 @@ jobs:
             echo "Downloading $u"
             curl -Ls "$u" -o "txc-build/downloads/$(basename "$u")"
           done
+
+          DL_COUNT=$(ls -1 txc-build/downloads/*.zip 2>/dev/null | wc -l | tr -d ' ')
+          echo "Downloaded ZIPs: $DL_COUNT"
+          if [ "$DL_COUNT" -eq 0 ]; then
+            echo "::error::No TXC ZIPs were downloaded after filtering."; exit 1
+          fi
 
       - name: Build stop→services index
         working-directory: txc-build
