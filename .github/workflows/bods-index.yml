@@ -114,30 +114,30 @@ jobs:
       - name: Install wrangler
         run: npm i -g wrangler
 
-      - name: Upload to Cloudflare KV (per ATCO)
+      # 🔁 New: upload each shard file as ONE KV key: shard:XXXX
+      - name: Upload shard JSON to Cloudflare KV
         working-directory: txc-build/shards
         env:
-         KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
-         CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}  # wrangler v3 expects this
+          KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}  # wrangler v3 expects this
         run: |
-         set -euo pipefail
+          set -euo pipefail
 
-         if [ -z "${KV_NAMESPACE_ID:-}" ]; then
-          echo "::error::KV_NAMESPACE_ID secret missing"; exit 1
-         fi
-         if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
-          echo "::error::CF_API_TOKEN (mapped to CLOUDFLARE_API_TOKEN) missing"; exit 1
-         fi
+          if [ -z "${KV_NAMESPACE_ID:-}" ]; then
+            echo "::error::KV_NAMESPACE_ID secret missing"; exit 1
+          fi
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "::error::CF_API_TOKEN (mapped to CLOUDFLARE_API_TOKEN) missing"; exit 1
+          fi
 
-         for f in *.json; do
-          echo "Uploading shard $f"
-          jq -r 'to_entries[] | "\(.key)\t\(.value|tojson)"' "$f" | \
-         while IFS=$'\t' read -r atco payload; do
-          wrangler kv key put "$atco" \
-           --namespace-id "$KV_NAMESPACE_ID" \
-           --value "$payload"
+          for f in *.json; do
+            prefix="${f%.json}"         # e.g. 0600.json -> 0600
+            key="shard:${prefix}"
+            echo "Uploading shard file $f as KV key '$key'"
+            wrangler kv key put "$key" \
+              --namespace-id "$KV_NAMESPACE_ID" \
+              --path "$f"
           done
-         done
 
       - name: Done
         run: echo "KV updated."
