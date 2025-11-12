@@ -1,0 +1,15 @@
+{
+  "name": "txc-build",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.js",
+    "shard": "node shard.js"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^4.4.0",
+    "glob": "^11.0.0",
+    "node-fetch": "^3.3.2",
+    "yauzl": "^2.10.0"
+  }
+}
