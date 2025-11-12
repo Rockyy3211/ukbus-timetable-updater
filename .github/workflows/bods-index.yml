@@ -2,7 +2,7 @@ name: Build & publish TXC (North West)
 
 on:
   schedule:
-    - cron: "0 3 * * 1"   # Mondays 03:00 UTC
+    - cron: "0 3 * * 1"
   workflow_dispatch: {}
 
 jobs:
@@ -12,19 +12,24 @@ jobs:
       contents: read
     env:
       CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-      CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}     # wrangler token with KV write
-      KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}# BUS_SERVICES_KV namespace ID
+      CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}
+      KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
       BODS_API_KEY:  ${{ secrets.BODS_API_KEY }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Use Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
       - name: Prepare dirs
         run: mkdir -p txc-build/downloads txc-build/shards
 
       - name: Install build deps
         working-directory: txc-build
-        run: npm ci
+        run: npm install --no-fund --no-audit
 
       - name: Download TXC datasets (North West)
         shell: bash
@@ -35,7 +40,6 @@ jobs:
           BASE="https://data.bus-data.dft.gov.uk/api/v1/dataset/?dataType=Timetables&page_size=1000"
           curl -s -H "Authorization: ApiKey $API" "$BASE" > datasets.json
 
-          # Filter by dataset name or admin areas commonly in NW (adjust over time)
           jq -r '
             .results[]
             | select(
