@@ -1,49 +1,107 @@
-- name: Download TXC datasets (North West)
-  shell: bash
-  env:
-    API: ${{ env.BODS_API_KEY }}   # make sure this secret exists!
-  run: |
-    set -euo pipefail
+name: Build & publish TXC (North West)
 
-    BASE="https://data.bus-data.dft.gov.uk/api/v1/dataset/?dataType=Timetables&page_size=1000"
+on:
+  schedule:
+    - cron: "0 3 * * 1"   # Mondays 03:00 UTC
+  workflow_dispatch: {}
 
-    # Call BODS with your API key; capture HTTP status
-    HTTP=$(curl -sS -H "Authorization: ApiKey $API" -H "Accept: application/json" \
-      -o datasets.json -w "%{http_code}" "$BASE")
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+      CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}
+      KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
+      BODS_API_KEY:  ${{ secrets.BODS_API_KEY }}
 
-    echo "BODS HTTP status: $HTTP"
-    # If not 200, show the body and fail clearly
-    if [ "$HTTP" != "200" ]; then
-      echo "---- BODS response body (truncated) ----"
-      head -c 1000 datasets.json || true
-      echo
-      echo "::error::BODS API request failed (HTTP $HTTP). Check BODS_API_KEY secret."
-      exit 1
-    fi
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    # Sanity: ensure .results exists; fallback to empty array to avoid jq error
-    COUNT=$(jq '(.results // []) | length' datasets.json)
-    echo "Datasets returned: $COUNT"
+      - name: Use Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
-    if [ "$COUNT" -eq 0 ]; then
-      echo "::warning::BODS returned 0 datasets. Printing first 400 chars for debugging:"
-      head -c 400 datasets.json || true
-      exit 1
-    fi
+      - name: Prepare dirs
+        run: mkdir -p txc-build/downloads txc-build/shards
 
-    # Filter to North West (name/adminAreas), then grab up to 10 download URLs for first run
-    jq -r '
-      (.results // [])
-      | map(select(
-          (.name | test("(?i)north\\s*west|greater manchester|merseyside|lancashire|cumbria|cheshire|blackpool|blackburn|warrington|halton|westmorland|cumberland"))
-          or ((.adminAreas // [])[] | test("(?i)(Greater Manchester|Merseyside|Lancashire|Cumbria|Cheshire East|Cheshire West and Chester|Blackburn with Darwen|Blackpool|Warrington|Halton|Westmorland and Furness|Cumberland)"))
-        ))
-      | .[:10]                        # limit for first run; remove later
-      | .[] .download_url
-    ' datasets.json | while read -r u; do
-      [ -z "$u" ] && continue
-      echo "Downloading $u"
-      curl -Ls "$u" -o "txc-build/downloads/$(basename "$u")"
-    done
+      - name: Install build deps
+        working-directory: txc-build
+        run: npm install --no-fund --no-audit
 
-    echo "Download step complete."
+      - name: Download TXC datasets (North West)
+        shell: bash
+        env:
+          API: ${{ env.BODS_API_KEY }}
+        run: |
+          set -euo pipefail
+          BASE="https://data.bus-data.dft.gov.uk/api/v1/dataset/?dataType=Timetables&page_size=1000"
+
+          # Call BODS and save body + HTTP status
+          HTTP=$(curl -sS -H "Authorization: ApiKey $API" -H "Accept: application/json" \
+            -o datasets.json -w "%{http_code}" "$BASE")
+          echo "BODS HTTP status: $HTTP"
+          if [ "$HTTP" != "200" ]; then
+            echo "---- Response (first 800 chars) ----"
+            head -c 800 datasets.json || true
+            echo
+            echo "::error::BODS API failed (HTTP $HTTP). Check BODS_API_KEY."
+            exit 1
+          fi
+
+          COUNT=$(jq '(.results // []) | length' datasets.json)
+          echo "Datasets returned: $COUNT"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::BODS returned 0 datasets."
+            exit 1
+          fi
+
+          # Filter to North West and limit to 10 zips for first run (remove | .[:10] later)
+          jq -r '
+            (.results // [])
+            | map(select(
+                (.name | test("(?i)north\\s*west|greater manchester|merseyside|lancashire|cumbria|cheshire|blackpool|blackburn|warrington|halton|westmorland|cumberland"))
+                or ((.adminAreas // [])[] | test("(?i)(Greater Manchester|Merseyside|Lancashire|Cumbria|Cheshire East|Cheshire West and Chester|Blackburn with Darwen|Blackpool|Warrington|Halton|Westmorland and Furness|Cumberland)"))
+              ))
+            | .[:10]
+            | .[] .download_url
+          ' datasets.json | while read -r u; do
+            [ -z "$u" ] && continue
+            echo "Downloading $u"
+            curl -Ls "$u" -o "txc-build/downloads/$(basename "$u")"
+          done
+
+      - name: Build stop→services index
+        working-directory: txc-build
+        run: npm run build
+
+      - name: Shard JSON
+        working-directory: txc-build
+        run: npm run shard
+
+      - name: Install wrangler
+        run: npm i -g wrangler
+
+      - name: Upload to Cloudflare KV (per ATCO)
+        working-directory: txc-build/shards
+        env:
+          CF_ACCOUNT_ID: ${{ env.CF_ACCOUNT_ID }}
+          KV_NAMESPACE_ID: ${{ env.KV_NAMESPACE_ID }}
+        run: |
+          set -e
+          for f in *.json; do
+            echo "Uploading shard $f"
+            jq -r 'to_entries[] | "\(.key)\t\(.value|tojson)"' "$f" | \
+            while IFS=$'\t' read -r atco payload; do
+              wrangler kv key put \
+                --account-id "$CF_ACCOUNT_ID" \
+                --namespace-id "$KV_NAMESPACE_ID" \
+                "$atco" "$payload" --force
+            done
+          done
+
+      - name: Done
+        run: echo "KV updated."
