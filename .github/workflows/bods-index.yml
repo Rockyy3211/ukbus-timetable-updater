@@ -82,7 +82,7 @@ jobs:
               )
             | flatten
             | map(select( (endswith(".zip") or contains("/download/")) ))
-            | .[:5]
+            | .[:10]
             | .[]
           ' datasets.json > urls.txt
 
