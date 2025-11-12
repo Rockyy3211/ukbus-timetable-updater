@@ -114,12 +114,12 @@ jobs:
       - name: Install wrangler
         run: npm i -g wrangler
 
-      # 🔁 New: upload each shard file as ONE KV key: shard:XXXX
+      # 🔁 Upload each shard file as ONE KV key: shard:XXXX (to remote KV)
       - name: Upload shard JSON to Cloudflare KV
         working-directory: txc-build/shards
         env:
           KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}  # wrangler v3 expects this
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}  # wrangler v4 expects this
         run: |
           set -euo pipefail
 
@@ -133,10 +133,11 @@ jobs:
           for f in *.json; do
             prefix="${f%.json}"         # e.g. 0600.json -> 0600
             key="shard:${prefix}"
-            echo "Uploading shard file $f as KV key '$key'"
+            echo "Uploading shard file $f as KV key '$key' (remote)"
             wrangler kv key put "$key" \
               --namespace-id "$KV_NAMESPACE_ID" \
-              --path "$f"
+              --path "$f" \
+              --remote
           done
 
       - name: Done
