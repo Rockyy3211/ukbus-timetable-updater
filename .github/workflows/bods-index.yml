@@ -1,164 +1,102 @@
-name: Build & publish TXC (North West)
+- name: Download TXC datasets (North West)
+  shell: bash
+  env:
+    API: ${{ secrets.BODS_API_KEY }}
+  run: |
+    set -euo pipefail
 
-on:
-  schedule:
-    - cron: "0 3 * * 1"   # Mondays 03:00 UTC
-  workflow_dispatch: {}
+    if [ -z "${API:-}" ]; then
+      echo "::error::BODS_API_KEY secret is missing."; exit 1
+    fi
+    echo "::add-mask::$API"
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    env:
-      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-      CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}
-      KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
-      BODS_API_KEY:  ${{ secrets.BODS_API_KEY }}
+    META_URL="https://data.bus-data.dft.gov.uk/api/v1/dataset/?limit=1000&status=published&api_key=$API"
+    HTTP=$(curl -sS -H "Accept: application/json" -o datasets.json -w "%{http_code}" "$META_URL")
+    echo "BODS metadata HTTP: $HTTP"
+    if [ "$HTTP" != "200" ]; then
+      echo "---- Response (first 800 chars) ----"
+      head -c 800 datasets.json || true
+      echo
+      echo "::error::BODS API failed (HTTP $HTTP). Check BODS_API_KEY."; exit 1
+    fi
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    COUNT=$(jq '(.results // []) | length' datasets.json)
+    echo "Metadata records: $COUNT"
+    if [ "$COUNT" -eq 0 ]; then
+      echo "::error::BODS returned 0 datasets."; exit 1
+    fi
 
-      - name: Use Node 20
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+    mkdir -p txc-build/downloads
 
-      - name: Prepare dirs
-        run: mkdir -p txc-build/downloads txc-build/shards
-
-      - name: Install build deps
-        working-directory: txc-build
-        run: npm install --no-fund --no-audit
-
-      - name: Download TXC datasets (North West)
-        shell: bash
-        env:
-          API: ${{ secrets.BODS_API_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${API:-}" ]; then
-            echo "::error::BODS_API_KEY secret is missing."; exit 1
-          fi
-          echo "::add-mask::$API"
-
-          META_URL="https://data.bus-data.dft.gov.uk/api/v1/dataset/?limit=1000&status=published&api_key=$API"
-          HTTP=$(curl -sS -H "Accept: application/json" -o datasets.json -w "%{http_code}" "$META_URL")
-          echo "BODS metadata HTTP: $HTTP"
-          if [ "$HTTP" != "200" ]; then
-            echo "---- Response (first 800 chars) ----"
-            head -c 800 datasets.json || true
-            echo
-            echo "::error::BODS API failed (HTTP $HTTP). Check BODS_API_KEY."; exit 1
-          fi
-
-          COUNT=$(jq '(.results // []) | length' datasets.json)
-          echo "Metadata records: $COUNT"
-          if [ "$COUNT" -eq 0 ]; then
-            echo "::error::BODS returned 0 datasets."; exit 1
-          fi
-
-          echo "Sample dataset fields (first record) for debugging:"
-          jq -C '(.results // [])[0] | {name, adminAreas, admin_areas, download_url, url, resources}' datasets.json | head -n 120 || true
-
-          # Build a list of *valid* download URLs:
-          # - Consider download_url, url, and any resources[].url
-          # - Keep only proper http(s) links
-          # - Prefer likely downloads: endswith .zip OR contains /download/
-          # - Limit to 10 for the first run (remove | .[:10] later)
-          jq -r '
-            (.results // [])
-            | map(
-                select(
-                  # dataset name match
-                  ((.name // "" | tostring)
-                    | test("(?i)(north\\s*west|greater manchester|merseyside|lancashire|cumbria|cheshire|blackpool|blackburn|warrington|halton|westmorland|cumberland)"))
-                  or
-                  # any admin area object name match (handles adminAreas/admin_areas variants)
-                  (
-                    ((.adminAreas // .admin_areas // [])
-                      | any(
-                          ((.name // .Name // "" | tostring)
-                            | test("(?i)(Greater Manchester|Merseyside|Lancashire|Cumbria|Cheshire East|Cheshire West and Chester|Blackburn with Darwen|Blackpool|Warrington|Halton|Westmorland and Furness|Cumberland)"))
-                        )
-                    )
+    # Build list of valid URLs from name/admin area-filtered datasets
+    jq -r '
+      (.results // [])
+      | map(
+          select(
+            ((.name // "" | tostring)
+              | test("(?i)(north\\s*west|greater manchester|merseyside|lancashire|cumbria|cheshire|blackpool|blackburn|warrington|halton|westmorland|cumberland)"))
+            or
+            (
+              ((.adminAreas // .admin_areas // [])
+                | any(
+                    ((.name // .Name // "" | tostring)
+                      | test("(?i)(Greater Manchester|Merseyside|Lancashire|Cumbria|Cheshire East|Cheshire West and Chester|Blackburn with Darwen|Blackpool|Warrington|Halton|Westmorland and Furness|Cumberland)"))
                   )
-                )
               )
-            | map(
-                [
-                  (.download_url // empty),
-                  (.url // empty),
-                  ((.resources // [])[]? .url // empty)
-                ]
-                | map(select(type=="string" and test("^https?://")))
-                | unique
-              )
-            | flatten
-            | map(select( (endswith(".zip") or contains("/download/")) ))
-            | .[:10]
-            | .[]
-          ' datasets.json > urls.txt
+            )
+          )
+        )
+      | map(
+          [
+            (.download_url // empty),
+            (.url // empty),
+            ((.resources // [])[]? .url // empty)
+          ]
+          | map(select(type=="string" and test("^https?://")))
+          | unique
+        )
+      | flatten
+      | map(select( (endswith(".zip") or contains("/download/")) ))
+      | .[:10]  # limit for first run; remove later
+      | .[]
+    ' datasets.json > urls.txt
 
-          echo "Filtered URLs (debug):"
-          nl -ba urls.txt || true
+    echo "Filtered URLs:"
+    nl -ba urls.txt || true
 
-          URL_COUNT=$(wc -l < urls.txt | tr -d ' ')
-          echo "Filtered download URLs: $URL_COUNT"
-          if [ "$URL_COUNT" -eq 0 ]; then
-            echo "::error::No valid download URLs after filtering.";
-            echo "Dumping first two NW-like datasets for inspection:"
-            jq -C '
-              (.results // [])
-              | map(select((.name // "" | test("(?i)(north\\s*west|greater manchester|merseyside|lancashire|cumbria|cheshire|blackpool|blackburn|warrington|halton|westmorland|cumberland)"))) 
-              | .[:2])
-              | .[]
-              | {name, download_url, url, resources}
-            ' datasets.json | head -n 200 || true
-            exit 1
-          fi
+    URL_COUNT=$(wc -l < urls.txt | tr -d ' ')
+    if [ "$URL_COUNT" -eq 0 ]; then
+      echo "::error::No valid download URLs after filtering."
+      echo "Dumping two matching datasets for inspection:"
+      jq -C '
+        (.results // [])
+        | map(select((.name // "" | test("(?i)(north\\s*west|greater manchester|merseyside|lancashire|cumbria|cheshire|blackpool|blackburn|warrington|halton|westmorland|cumberland)"))) 
+        | .[:2])
+        | .[]
+        | {name, download_url, url, resources}
+      ' datasets.json | head -n 200 || true
+      exit 1
+    fi
 
-          while IFS= read -r u; do
-            [ -z "$u" ] && continue
-            echo "Downloading $u"
-            curl -Ls "$u" -o "txc-build/downloads/$(basename "$u")"
-          done < urls.txt
+    # Download with curl -f (fail on HTTP error). If one URL fails, we keep going.
+    # We also count how many succeeded.
+    OK=0
+    while IFS= read -r u; do
+      [ -z "$u" ] && continue
+      OUT="txc-build/downloads/$(basename "$u")"
+      echo "Downloading $u -> $OUT"
+      if curl -fLs "$u" -o "$OUT"; then
+        OK=$((OK+1))
+      else
+        echo "::warning::Failed to download $u"
+        rm -f "$OUT" || true
+      fi
+    done < urls.txt
 
-          DL_COUNT=$(ls -1 txc-build/downloads/*.zip 2>/dev/null | wc -l | tr -d ' ')
-          echo "Downloaded ZIPs: $DL_COUNT"
-          if [ "$DL_COUNT" -eq 0 ]; then
-            echo "::error::No TXC ZIPs were downloaded."; exit 1
-          fi
-
-      - name: Build stop→services index
-        working-directory: txc-build
-        run: npm run build
-
-      - name: Shard JSON
-        working-directory: txc-build
-        run: npm run shard
-
-      - name: Install wrangler
-        run: npm i -g wrangler
-
-      - name: Upload to Cloudflare KV (per ATCO)
-        working-directory: txc-build/shards
-        env:
-          CF_ACCOUNT_ID: ${{ env.CF_ACCOUNT_ID }}
-          KV_NAMESPACE_ID: ${{ env.KV_NAMESPACE_ID }}
-        run: |
-          set -e
-          for f in *.json; do
-            echo "Uploading shard $f"
-            jq -r 'to_entries[] | "\(.key)\t\(.value|tojson)"' "$f" | \
-            while IFS=$'\t' read -r atco payload; do
-              wrangler kv key put \
-                --account-id "$CF_ACCOUNT_ID" \
-                --namespace-id "$KV_NAMESPACE_ID" \
-                "$atco" "$payload" --force
-            done
-          done
-
-      - name: Done
-        run: echo "KV updated."
+    echo "Successful downloads: $OK"
+    # Safe count with find (won't trip set -e/pipefail)
+    DL_COUNT=$(find txc-build/downloads -maxdepth 1 -type f -name '*.zip' | wc -l | tr -d ' ')
+    echo "ZIPs present: $DL_COUNT"
+    if [ "$DL_COUNT" -eq 0 ]; then
+      echo "::error::No TXC ZIPs were downloaded."; exit 1
+    fi
