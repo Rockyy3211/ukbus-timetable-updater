@@ -62,7 +62,7 @@ jobs:
                     | test("(?i)(north\\s*west|greater manchester|merseyside|lancashire|cumbria|cheshire|blackpool|blackburn|warrington|halton|westmorland|cumberland)"))
                   or
                   (
-                    ((.adminAreas // .admin_areas // [])
+                    ((.adminAreas // .admin_areas // [] )
                       | any(
                           ((.name // .Name // "" | tostring)
                             | test("(?i)(Greater Manchester|Merseyside|Lancashire|Cumbria|Cheshire East|Cheshire West and Chester|Blackburn with Darwen|Blackpool|Warrington|Halton|Westmorland and Furness|Cumberland)"))
@@ -95,13 +95,40 @@ jobs:
             [ -z "$u" ] && continue
             i=$((i+1)); printf -v OUT "txc-build/downloads/dataset-%03d.zip" "$i"
             echo "Downloading $u -> $OUT"
-            if curl -fLs "$u" -o "$OUT"; then OK=$((OK+1)); else echo "::warning::Failed $u"; rm -f "$OUT" || true; fi
+            if curl -fLs "$u" -o "$OUT"; then
+              OK=$((OK+1))
+            else
+              echo "::warning::Failed $u"
+              rm -f "$OUT" || true
+            fi
           done < urls.txt
 
-          echo "Successful downloads: $OK"
+          echo "Successful downloads (raw): $OK"
           DL_COUNT=$(find txc-build/downloads -maxdepth 1 -type f -name 'dataset-*.zip' | wc -l | tr -d ' ')
-          echo "ZIPs present: $DL_COUNT"
+          echo "ZIPs present (raw): $DL_COUNT"
           if [ "$DL_COUNT" -eq 0 ]; then echo "::error::No TXC ZIPs were downloaded."; exit 1; fi
+
+      # 🔍 New: validate ZIPs and drop any corrupt ones
+      - name: Validate TXC ZIPs
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          echo "Validating downloaded ZIPs..."
+          for f in txc-build/downloads/dataset-*.zip; do
+            echo "Testing $f"
+            if ! unzip -tqq "$f"; then
+              echo "::warning::Invalid ZIP, removing $f"
+              rm -f "$f"
+            fi
+          done
+
+          VALID_COUNT=$(find txc-build/downloads -maxdepth 1 -type f -name 'dataset-*.zip' | wc -l | tr -d ' ')
+          echo "Valid ZIPs after validation: $VALID_COUNT"
+          if [ "$VALID_COUNT" -eq 0 ]; then
+            echo "::error::No valid TXC ZIPs after validation."; exit 1
+          fi
 
       - name: Build stop→services index
         working-directory: txc-build
@@ -114,12 +141,12 @@ jobs:
       - name: Install wrangler
         run: npm i -g wrangler
 
-      # 🔁 Upload each shard file as ONE KV key: shard:XXXX (to remote KV)
+      # Upload each shard JSON as a single KV key: shard:XXXX
       - name: Upload shard JSON to Cloudflare KV
         working-directory: txc-build/shards
         env:
           KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}  # wrangler v4 expects this
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}  # wrangler v3 expects this
         run: |
           set -euo pipefail
 
@@ -131,13 +158,12 @@ jobs:
           fi
 
           for f in *.json; do
-            prefix="${f%.json}"         # e.g. 0600.json -> 0600
+            prefix="${f%.json}"         # e.g. 1800.json -> 1800
             key="shard:${prefix}"
-            echo "Uploading shard file $f as KV key '$key' (remote)"
+            echo "Uploading shard file $f as KV key '$key'"
             wrangler kv key put "$key" \
               --namespace-id "$KV_NAMESPACE_ID" \
-              --path "$f" \
-              --remote
+              --path "$f"
           done
 
       - name: Done
