@@ -1,8 +1,8 @@
-name: Build & publish TXC (North West)
+name: Build & publish TXC (NW + Scotland + Wales)
 
 on:
   schedule:
-    - cron: "0 3 * * 1"
+    - cron: "0 3 * * 1"   # Mondays 03:00 UTC
   workflow_dispatch: {}
 
 jobs:
@@ -30,43 +30,70 @@ jobs:
         working-directory: txc-build
         run: npm install --no-fund --no-audit
 
-      - name: Download TXC datasets (North West)
+      - name: Download TXC datasets (NW + Scotland + Wales)
         shell: bash
         env:
           API: ${{ secrets.BODS_API_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "${API:-}" ]; then echo "::error::BODS_API_KEY secret is missing."; exit 1; fi
+          if [ -z "${API:-}" ]; then
+            echo "::error::BODS_API_KEY secret is missing."
+            exit 1
+          fi
           echo "::add-mask::$API"
 
           META_URL="https://data.bus-data.dft.gov.uk/api/v1/dataset/?limit=1000&status=published&api_key=$API"
           HTTP=$(curl -sS -H "Accept: application/json" -o datasets.json -w "%{http_code}" "$META_URL")
           echo "BODS metadata HTTP: $HTTP"
           if [ "$HTTP" != "200" ]; then
-            head -c 800 datasets.json || true; echo
-            echo "::error::BODS API failed (HTTP $HTTP)."; exit 1
+            echo "---- Response (first 800 chars) ----"
+            head -c 800 datasets.json || true
+            echo
+            echo "::error::BODS API failed (HTTP $HTTP)."
+            exit 1
           fi
 
           COUNT=$(jq '(.results // []) | length' datasets.json)
           echo "Metadata records: $COUNT"
-          if [ "$COUNT" -eq 0 ]; then echo "::error::BODS returned 0 datasets."; exit 1; fi
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::BODS returned 0 datasets."
+            exit 1
+          fi
 
           mkdir -p txc-build/downloads
 
-          # Build list of valid URLs for NW and save as fixed .zip filenames
+          # Build list of valid URLs for:
+          # - North West
+          # - Scotland
+          # - Wales
           jq -r '
             (.results // [])
             | map(
                 select(
+                  # ----- NAME-BASED HINTS (NW + Scotland + Wales) -----
                   ((.name // "" | tostring)
-                    | test("(?i)(north\\s*west|greater manchester|merseyside|lancashire|cumbria|cheshire|blackpool|blackburn|warrington|halton|westmorland|cumberland)"))
+                    | test("(?i)("
+                      + "north\\s*west|greater manchester|merseyside|lancashire|cumbria|cheshire|blackpool|blackburn|warrington|halton|westmorland|cumberland"
+                      + "|scotland|glasgow|edinburgh|highland|aberdeen|dundee"
+                      + "|wales|cymru|cardiff|swansea|newport"
+                      + ")"
+                    ))
                   or
+                  # ----- ADMIN AREA MATCH (NW + Scotland + Wales) -----
                   (
                     ((.adminAreas // .admin_areas // [] )
                       | any(
                           ((.name // .Name // "" | tostring)
-                            | test("(?i)(Greater Manchester|Merseyside|Lancashire|Cumbria|Cheshire East|Cheshire West and Chester|Blackburn with Darwen|Blackpool|Warrington|Halton|Westmorland and Furness|Cumberland)"))
-                        )
+                            | test("(?i)("
+                              # North West admin areas
+                              + "Greater Manchester|Merseyside|Lancashire|Cumbria|Cheshire East|Cheshire West and Chester|Blackburn with Darwen|Blackpool|Warrington|Halton|Westmorland and Furness|Cumberland"
+                              # Scotland admin areas
+                              + "|Aberdeen|Aberdeenshire|Angus|Argyll and Bute|Clackmannanshire|Dumfries and Galloway|Dundee City|East Ayrshire|East Dunbartonshire|East Lothian|East Renfrewshire|City of Edinburgh|Falkirk|Fife|Glasgow City|Highland|Inverclyde|Midlothian|Moray|North Ayrshire|North Lanarkshire|Orkney Islands|Perth and Kinross|Renfrewshire|Scottish Borders|Shetland Islands|South Ayrshire|South Lanarkshire|Stirling|West Dunbartonshire|West Lothian|Western Isles|Na h-Eileanan Siar"
+                              # Wales admin areas
+                              + "|Isle of Anglesey|Gwynedd|Conwy|Denbighshire|Flintshire|Wrexham|Powys|Ceredigion|Pembrokeshire|Carmarthenshire|Swansea|Neath Port Talbot|Bridgend|Vale of Glamorgan|Cardiff|Rhondda Cynon Taf|Merthyr Tydfil|Caerphilly|Blaenau Gwent|Torfaen|Monmouthshire|Newport"
+                              + ")")
+                          )
+                      )
                     )
                   )
                 )
@@ -86,14 +113,22 @@ jobs:
             | .[]
           ' datasets.json > urls.txt
 
-          echo "Filtered URLs:"; nl -ba urls.txt || true
-          URL_COUNT=$(wc -l < urls.txt | tr -d ' ')
-          if [ "$URL_COUNT" -eq 0 ]; then echo "::error::No valid download URLs after filtering."; exit 1; fi
+          echo "Filtered URLs:"
+          nl -ba urls.txt || true
 
-          OK=0; i=0
+          URL_COUNT=$(wc -l < urls.txt | tr -d ' ')
+          echo "URL_COUNT=$URL_COUNT"
+          if [ "$URL_COUNT" -eq 0 ]; then
+            echo "::error::No valid download URLs after filtering."
+            exit 1
+          fi
+
+          OK=0
+          i=0
           while IFS= read -r u; do
             [ -z "$u" ] && continue
-            i=$((i+1)); printf -v OUT "txc-build/downloads/dataset-%03d.zip" "$i"
+            i=$((i+1))
+            printf -v OUT "txc-build/downloads/dataset-%03d.zip" "$i"
             echo "Downloading $u -> $OUT"
             if curl -fLs "$u" -o "$OUT"; then
               OK=$((OK+1))
@@ -106,7 +141,10 @@ jobs:
           echo "Successful downloads (raw): $OK"
           DL_COUNT=$(find txc-build/downloads -maxdepth 1 -type f -name 'dataset-*.zip' | wc -l | tr -d ' ')
           echo "ZIPs present (raw): $DL_COUNT"
-          if [ "$DL_COUNT" -eq 0 ]; then echo "::error::No TXC ZIPs were downloaded."; exit 1; fi
+          if [ "$DL_COUNT" -eq 0 ]; then
+            echo "::error::No TXC ZIPs were downloaded."
+            exit 1
+          fi
 
       # 🔍 Validate ZIPs and drop any corrupt ones
       - name: Validate TXC ZIPs
@@ -127,7 +165,8 @@ jobs:
           VALID_COUNT=$(find txc-build/downloads -maxdepth 1 -type f -name 'dataset-*.zip' | wc -l | tr -d ' ')
           echo "Valid ZIPs after validation: $VALID_COUNT"
           if [ "$VALID_COUNT" -eq 0 ]; then
-            echo "::error::No valid TXC ZIPs after validation."; exit 1
+            echo "::error::No valid TXC ZIPs after validation."
+            exit 1
           fi
 
       - name: Build stop→services index
@@ -151,10 +190,12 @@ jobs:
           set -euo pipefail
 
           if [ -z "${KV_NAMESPACE_ID:-}" ]; then
-            echo "::error::KV_NAMESPACE_ID secret missing"; exit 1
+            echo "::error::KV_NAMESPACE_ID secret missing"
+            exit 1
           fi
           if [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
-            echo "::error::CF_API_TOKEN (mapped to CLOUDFLARE_API_TOKEN) missing"; exit 1
+            echo "::error::CF_API_TOKEN (mapped to CLOUDFLARE_API_TOKEN) missing"
+            exit 1
           fi
 
           for f in *.json; do
