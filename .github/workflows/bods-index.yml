@@ -108,7 +108,7 @@ jobs:
           echo "ZIPs present (raw): $DL_COUNT"
           if [ "$DL_COUNT" -eq 0 ]; then echo "::error::No TXC ZIPs were downloaded."; exit 1; fi
 
-      # 🔍 New: validate ZIPs and drop any corrupt ones
+      # 🔍 Validate ZIPs and drop any corrupt ones
       - name: Validate TXC ZIPs
         shell: bash
         run: |
@@ -163,7 +163,8 @@ jobs:
             echo "Uploading shard file $f as KV key '$key'"
             wrangler kv key put "$key" \
               --namespace-id "$KV_NAMESPACE_ID" \
-              --path "$f"
+              --path "$f" \
+              --remote
           done
 
       - name: Done
