@@ -26,7 +26,11 @@ const UK_NOW = new Date().toLocaleString("en-GB", { timeZone: "Europe/London" })
 const TODAY = new Date(UK_NOW);
 
 // XML parser
-const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "", trimValues: true });
+const parser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: "",
+  trimValues: true,
+});
 
 // atco -> Map<key, svc>
 const stopToServices = new Map();
@@ -77,10 +81,11 @@ function operatorIsAllowed(name) {
 }
 
 // stats
-let filesParsed = 0,
-  servicesSeen = 0,
-  servicesKept = 0,
-  servicesExpired = 0;
+let filesParsed = 0;
+let servicesSeen = 0;
+let servicesKept = 0;
+let servicesExpired = 0;
+let servicesFilteredOperator = 0; // NEW
 
 // NEW: operator metadata (filled before we start parsing zips)
 let nocMap = new Map();
@@ -150,8 +155,8 @@ function parseTXC(xml) {
       ? sec.JourneyPatternTimingLink
       : [sec.JourneyPatternTimingLink].filter(Boolean);
     for (const link of links) {
-      const f = link.From?.StopPointRef,
-        t = link.To?.StopPointRef;
+      const f = link.From?.StopPointRef;
+      const t = link.To?.StopPointRef;
       if (f) sectionStops.add(String(f).trim());
       if (t) sectionStops.add(String(t).trim());
     }
@@ -236,15 +241,27 @@ function parseTXC(xml) {
       rawCode = opRef || txcOpName;
     }
 
-    const resolvedOperator = resolveOperator(rawCode, txcOpName, nocMap, opOverrides);
+    const resolvedOperator = resolveOperator(
+      rawCode,
+      txcOpName,
+      nocMap,
+      opOverrides
+    );
+
+    // 🔒 FILTER: only keep allowed operators (Stagecoach + Bee Network)
+    const opForFilter = resolvedOperator || txcOpName;
+    if (!operatorIsAllowed(opForFilter)) {
+      servicesFilteredOperator++;
+      continue;
+    }
 
     const refGuess = (s.ServiceRef || s.LineName || line || "").toString();
 
     const svc = {
       ref: String(refGuess).trim(),
       name: String(line || refGuess || "").trim(),
-      operator: String(resolvedOperator || "").trim(),     // pretty name
-      operatorCode: String(rawCode || "").trim(),          // underlying code/NOC
+      operator: String(resolvedOperator || txcOpName || "").trim(), // pretty name
+      operatorCode: String(rawCode || "").trim(),                    // underlying code/NOC
       serviceCode: code,
     };
 
@@ -305,20 +322,24 @@ for (const [atco, map] of stopToServices.entries()) {
     return m ? +m[1] : NaN;
   };
   arr.sort((a, b) => {
-    const an = num(a.ref),
-      bn = num(b.ref);
+    const an = num(a.ref);
+    const bn = num(b.ref);
     if (!isNaN(an) && !isNaN(bn)) return an - bn;
     if (!isNaN(an)) return -1;
     if (!isNaN(bn)) return 1;
-    return String(a.ref || a.name).localeCompare(String(b.ref || b.name), undefined, {
-      numeric: true,
-    });
+    return String(a.ref || a.name).localeCompare(
+      String(b.ref || b.name),
+      undefined,
+      { numeric: true }
+    );
   });
   out[atco] = arr;
 }
+
 fs.writeFileSync(OUT_FILE, JSON.stringify(out));
 console.log("Wrote", OUT_FILE, "stops:", Object.keys(out).length);
 console.log("Files parsed:", filesParsed);
 console.log("Services seen:", servicesSeen);
-console.log("Services kept (active today):", servicesKept);
+console.log("Services kept (active today, allowed operators):", servicesKept);
 console.log("Services skipped (expired/not yet valid):", servicesExpired);
+console.log("Services skipped (operator not allowed):", servicesFilteredOperator);
