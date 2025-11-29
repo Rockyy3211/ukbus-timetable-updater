@@ -32,6 +32,50 @@ const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "",
 const stopToServices = new Map();
 const bestServiceVersion = new Map(); // serviceCode -> { rev, pubTs }
 
+// --- Operator filtering: only keep Stagecoach + Bee Network family ---
+
+const ALLOWED_OPERATORS = [
+  "Stagecoach Yorkshire",
+  "Stagecoach East Scotland",
+  "Stagecoach East",
+  "Stagecoach West Scotland",
+  "Stagecoach Guernsey",
+  "Stagecoach Merseyside and South Lancashire",
+  "Stagecoach West",
+  "Stagecoach South West",
+  "Stagecoach Oxfordshire",
+  "Stagecoach East Midlands",
+  "Stagecoach South",
+  "Stagecoach London",
+  "Stagecoach North East",
+  "Stagecoach Cumbria and North Lancashire",
+  "Stagecoach North Scotland",
+  "Stagecoach South East",
+  "Stagecoach Midlands",
+  "Stagecoach South Wales",
+  "Bee Network - Metroline",
+  "Bee Network - Vision Bus",
+  "Bee Network - First Manchester",
+  "Bee Network - Go North West",
+  "Bee Network - Stagecoach Manchester",
+  "Bee Network - Diamond Bus North West",
+];
+
+// normalise: lower-case, collapse spaces, strip punctuation-ish
+function normOpName(str) {
+  return String(str || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+const ALLOWED_NORMALISED = new Set(ALLOWED_OPERATORS.map(normOpName));
+
+function operatorIsAllowed(name) {
+  if (!name) return false;
+  return ALLOWED_NORMALISED.has(normOpName(name));
+}
+
 // stats
 let filesParsed = 0,
   servicesSeen = 0,
